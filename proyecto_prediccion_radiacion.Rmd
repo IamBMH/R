@@ -1,0 +1,768 @@
+---
+title: "Proyecto_Radiación"
+author: "Bruno C. Mora Hernández"
+date: "26/1/2021"
+output:
+  pdf_document: 
+    latex_engine: xelatex
+    toc_depth: 2
+    fig_height: 4
+    fig_width: 5
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+# Fase de Depuración
+
+```{r Fijación del directorio de trabajo y carga de librerías, include=FALSE}
+setwd("C:/Users/bruno/Desktop/Big Data & Data Science/Módulo Data Mining/Proyecto")
+source("Funciones_R.R")
+library(xts)
+library(forecast)
+library(grid)
+library(gridExtra)
+library(ggplot2)
+library(dplyr)
+library(psych)
+library(corrplot)
+library(caret)
+library(lmSupport)
+library(questionr)
+library(ggplot2)
+library(glmnet)
+library(epiDisplay)
+library(pROC)
+library(kableExtra)
+```
+
+```{r Inspección inicia}
+Radiacion <- readRDS("C:/Users/bruno/Desktop/Big Data & Data Science/Módulo Data Mining/Proyecto/Rad2018.RDS")
+str(Radiacion)
+
+```
+
+El resumen del dataset muestra la presencia de outliers en muchísimas de las categorías, también se puede comprobar que la mayoría de las variables son continuas, aunque esto requiere de una inspección más profunda para determinar si todas son numéricas..
+
+```{r}
+summary(Radiacion)
+```
+
+```{r Contador de variables diferentes }
+#Contamos el número de variables diferentes para ir sospechando de las variables
+sapply(Filter(is.numeric, Radiacion), function(x) length(unique(x)))
+```
+## Exploración gráfica 1:
+
+```{r, gráfica 1, echo=FALSE}
+box <- dfplot_box(data.frame(Radiacion)[,-1]) 
+marrangeGrob(box, ncol = 4, nrow = 3) 
+```
+## Exploración gráfica 2:
+
+```{r, echo=FALSE}
+his <- dfplot_his(data.frame(Radiacion)[,-1])
+marrangeGrob(his, ncol = 4, nrow = 3)
+
+```
+
+Efectivamente PicoRad es categórica, y también deberíamos sospechar de las variables: "Rn","Desc.Rn","Pres", "Temp","HR", "Isolar", "Vviento" y "Lluvia". Deberíamos plantearnos que quizá alguna de estas variables podrían ser reconvertidas a cualitativas, u otra posibilidad, dejarlas como numéricas pero tramificándolas en el futuro.
+
+En principio todas la variables exploradas pueden funcionar bien como numéricas, sí que hay que comentar que "Lluvia" por ejemplo cuenta con muchos valores que son 0, y quizá una opción podría ser convertirla a factor. Poniendo como categorías : 0 No llueve, 1 Llueve. "Fecha" la vamos a convertir en factor y a dividir en cuartos.
+
+## Modificación de variables
+
+```{r Modificaciones de las variables y racategorización }
+# Lluvia convertido a factor, con recategorización
+Radiacion$Lluvia <-as.numeric(as.character(Radiacion$Lluvia))
+Radiacion$Lluvia <- replace(Radiacion$Lluvia, which(Radiacion$Lluvia == 0.0), 0) 
+Radiacion$Lluvia <- replace(Radiacion$Lluvia, which(Radiacion$Lluvia > 0.0), 1)
+Radiacion$Lluvia <- car::recode(Radiacion$Lluvia, "'1' = 1; '0' = 0", as.factor = T)
+#Picorad la convertimos en factor
+Radiacion$PicoRad <- car::recode(Radiacion$PicoRad, " '1' = '1'; '2' = '2' ", as.factor = T)
+
+```
+
+## Distribución de variables de las cualitativas
+
+```{r reparto de categorias variables cualitativas, echo=FALSE}
+questionr::freq(Radiacion$PicoRad)
+questionr::freq(Radiacion$Lluvia)
+```
+## Gestión de los outliers(valores atípicos) y missings(valores perdidos):
+
+```{r }
+#Quitamos las variables objetivo y trabajamos sólo con los al archivo de predictores, cramos la variable input:
+varObjCont <- Radiacion$TD
+varObjBin <- Radiacion$PicoRad
+input <- as.data.frame(Radiacion[,-c(1,2,13)])
+row.names(input)<- Radiacion$Fecha # Ponemos la fecha como ID de nuestro dataset
+```
+
+## Outliers
+
+```{r Porcentaje de valores atípicos por variable}
+sapply(Filter(is.numeric, input),function(x) atipicosAmissing(x)[[2]])/nrow(input)
+
+```
+
+```{r Atípicos a Missings}
+#Convertimos los valores atípicos a valores que faltan
+input[,as.vector(which(sapply(input, class)=="numeric"))]<-sapply(Filter(is.numeric, input),function(x) atipicosAmissing(x)[[1]])
+
+sum(is.na(input))
+```
+## Missings 
+
+Valoramos la proporción de missings por variable y por observaciones: La categoría que más missings acumula tiene un 30% de valores perdidos.
+
+```{r Resumen proporción de missings }
+input$prop_missings<-apply(is.na(input),1,mean)
+summary(input$prop_missings)
+```
+
+```{r Proporción de missings por variales }
+(prop_missingsVars<-apply(is.na(input),2,mean))
+```
+
+Como no son procentajes muy exagerados, la estrategia que vamos a seguir a partir de ahora será realizar una imputación, es decir, sustituímos en las variables cuantitativas y cualitativas los missings por valores válidos generados de forma aleatoria.
+
+## Imputaciones
+
+```{r Imputación cuantitativas}
+# Imputo todas las cuantitativas, imputación aleatoria
+input[,as.vector(which(sapply(input, class)=="numeric"))]<-sapply(
+  Filter(is.numeric, input),function(x) Hmisc::impute(x,"random"))
+```
+
+```{r Imputación aleatoria sólo 1 variable}
+input$Lluvia <- ImputacionCuali(input$Lluvia, "aleatorio")
+```
+
+```{r Comprobación}
+#Comprobamos si quedan missings
+summary(input)
+any(is.na(input))
+```
+
+## Graficamos el datset
+
+```{r Grafica, echo=FALSE}
+par(mfrow=c(3,3))
+lista_his<-dfplot_his(input)
+gridExtra::marrangeGrob(lista_his,nrow=4,ncol=3)
+```
+
+```{r Guardamos, include=FALSE}
+# Finalmente guardamos el dataset con los datos depurados
+saveRDS(cbind(varObjBin, varObjCont, input),"datosRadDep2")
+```
+
+# Regresión Lineal
+
+```{r, include=FALSE }
+#Cargamos datos
+datos<-readRDS("C:/Users/bruno/Desktop/Big Data & Data Science/Módulo Data Mining/Proyecto/datosRadDep2")
+# Separamos las variables objetivo del input
+varObjCont <- datos$varObjCont
+varObjBin <- datos$varObjBin
+# Creamos las varibles aleatorias
+input$aleatorio <- runif(nrow(input))
+input$aleatorio2 <- runif(nrow(input))
+```
+
+## Análisis descriptivo entre pares de variables
+```{r, echo=FALSE}
+#Obtención de la importancia de las variables
+graficoVcramer(input, varObjCont)
+```
+
+```{r, echo=FALSE}
+# Vemos gráficamente en efecto la variable cualitativa sobre la binaria
+g1 <- barras_targetbinaria(input$Lluvia, varObjBin,"Lluvia")
+# Vemos gráficamente en efecto dos variables cuantitativas sobre la binaria
+g2 <- boxplot_targetbinaria(input$HS, varObjBin, "Humedad suelo")
+g3 <- boxplot_targetbinaria(input$Temp.Su, varObjBin, "Temperatura suelo")
+g4 <- hist_targetbinaria(input$HS, varObjBin, "Humedad suelo")
+g5 <- hist_targetbinaria(input$Temp.Su, varObjBin, "Temperatura suelo")
+
+gridExtra::marrangeGrob(list(g1,g2,g3,g4,g5), nrow =3 , ncol =2 )
+```
+
+```{r Matriz de correlaciones, echo=FALSE}
+corrplot(cor(cbind(varObjCont,Filter(is.numeric,input)), use = "pairwise", method = "pearson"), method = "number", type = "upper")
+```
+
+### Ranking de las variables continuas (con respecto a la variable objetivo):
+
+1. Temp.Su (Temperadtura del suelo)
+2. Temperatura
+3. Rn (Concentración de Radón)
+
+Existen También correlaciones negativas que indican una relación inversa entre los predictores, es decir, cuando una varibale aumenta su valor, la otra variable los baja. En el caso de nuestra variable objetivo continua (TD) parece existir una alta correlación inversa con el predictor HS.
+
+Relaciones entre los predictores: Cuidado con los problemas de colinealidad a la hora de realizar los modelos Porque se ve cláramente que hay relación entre algunos predictores,  a la hora de realizar los modelos debemos fijarnos en el siguiente esquema, parece probable que haya efecto de interacción  o confusión entre las variables.
+
+Pares de variables:
+
+1.Rn- Desc.Rn, la correlación es relativamente alta
+2.Temp - Temp.Su, estos dos predictores presentan alta correlación, cuidado con ellas, 
+3.Temp, también presenta correlación inversa elevada con HR y HS.
+4.HR-HS, con este par de variables también hay que ir con precaución, presentan correlación alta.
+5.HR-HS, También presentan correlación inversa elevada con Temp.Su.
+6.Isolar- Temp.Su, Presentan una notable correlación.
+
+
+## Inicio de la regresión lineal
+
+Las transformaciones nos perjudican los modelos, haciendo que la colinealidad aumente muchísimo por la correlación de los parámetros, vamos a trabajar sin transformaciones.
+
+```{r Buscamos las mejores transformaciones, include=FALSE}
+#Busco las mejores transformaciones para las variable numéricas con respecto a los dos tipos de variables
+input_cont <- cbind(input, Transf_Auto(Filter(is.numeric, input), varObjCont))
+#Cuento el número de valores diferentes para las numéricas
+sapply(Filter(is.numeric, input)[,-ncol(Filter(is.numeric,input))],function(x) length(unique(x)))
+#Hacemos lo propio con la variable binaria, eliminamos prop_missings que solo tiene 4 valores distintos.
+input_bin <- cbind(input, Transf_Auto(Filter(is.numeric, input)[,-10], varObjBin))
+#Guardamos los archivos
+saveRDS(data.frame(input_bin, varObjBin), "C:/Users/bruno/Desktop/Big Data & Data Science/Módulo Data Mining/Proyecto/todo_bin_radiacion2")
+saveRDS(data.frame(input_cont, varObjCont), "C:/Users/bruno/Desktop/Big Data & Data Science/Módulo Data Mining/Proyecto/todo_cont_radiacion2")
+```
+
+```{r Particiones, include=FALSE}
+#Comenzamos la regresión lineal
+todo <- data.frame(input, varObjCont)
+#Hacemos las particiones para el los datos normales y para los datos ecalados
+set.seed(123456)
+trainIndex <- createDataPartition(todo$varObjCont, p = 0.8, list = FALSE)
+data_train <- todo[trainIndex,]
+data_test <- todo[-trainIndex,]
+```
+
+```{r, modelo prelimirar}
+#Modelo preliminar con todas las variables
+modeloPreliminar <- lm(varObjCont~., data = data_train)
+summary(modeloPreliminar)
+Rsq(modeloPreliminar,"varObjCont", data_train) #R2 0.73
+Rsq(modeloPreliminar, "varObjCont", data_test) #R2 0.71
+car::vif(modeloPreliminar) #Colinealidad elevada, habrá que quitar una de las variables de temperatura
+```
+
+El modelo preliminar revela que existe colinealidad entre las variables de temperatura y demás la fecha también da un vif peligroso. A partir de ahora trabajaremos sólo con "Temp.Su" que resultó ser más influyente según nuestro análisis de importancia de las variables.
+
+## Modelado manual con la técnica forward 
+
+```{r, results='hide'}
+modelo01 <- lm(varObjCont~ +Rn , data= data_train ) #Modelo muy malo
+summary(modelo01)
+Rsq(modelo01,"varObjCont", data_train) #R2 0.13
+Rsq(modelo01, "varObjCont", data_test) #R2 0.15
+```
+
+```{r,results='hide'}
+modelo02 <- lm(varObjCont~ +Rn +Desc.Rn , data= data_train ) #Modelo malo
+summary(modelo02)
+Rsq(modelo02,"varObjCont", data_train) #R2 0.13
+Rsq(modelo02, "varObjCont", data_test) #R2 0.15
+car::vif(modelo02) # Vif normal no hay colinealidad entre estas variables
+```
+
+```{r,results='hide'}
+modelo03 <- lm(varObjCont~ +Rn+Desc.Rn+Pres , data= data_train ) #Modelo malo
+summary(modelo03)
+Rsq(modelo03,"varObjCont", data_train) #R2 0.14
+Rsq(modelo03, "varObjCont", data_test) #R2 0.16
+
+```
+
+```{r,results='hide'}
+modelo04 <- lm(varObjCont~ +Rn+Desc.Rn+Pres+Temp.Su , data= data_train ) # Mejora mucho
+summary(modelo04)
+Rsq(modelo04,"varObjCont", data_train) # R2 0.48
+Rsq(modelo04, "varObjCont", data_test) # R2 0.48
+```
+
+```{r,results='hide'}
+modelo05 <- lm(varObjCont~ +Rn+Desc.Rn+Pres+Temp.Su+HR , data= data_train ) #Va mejorando
+summary(modelo05)
+Rsq(modelo05,"varObjCont", data_train) #R2 0.49
+Rsq(modelo05, "varObjCont", data_test) #R2 0.49
+```
+
+```{r,results='hide'}
+modelo06 <- lm(varObjCont~ +Rn+Desc.Rn+Pres+Temp.Su+HR+HS , data= data_train ) # mejora bastante
+summary(modelo06)
+Rsq(modelo06,"varObjCont", data_train) #R2 0.68
+Rsq(modelo06, "varObjCont", data_test) #R2 0.66
+```
+
+```{r,results='hide'}
+modelo07 <- lm(varObjCont~ +Rn+Desc.Rn+Pres+Temp.Su+HR+HS+Isolar , data= data_train ) # Mejora poco
+summary(modelo07)
+Rsq(modelo07,"varObjCont", data_train) #R2 0.68
+Rsq(modelo07, "varObjCont", data_test) #R2 0.66
+```
+
+```{r,results='hide'}
+modelo08 <- lm(varObjCont~ +Rn+Desc.Rn+Pres+Temp.Su+HR+HS+Isolar+Vviento , data= data_train ) # Menjora poco
+summary(modelo08)
+Rsq(modelo08,"varObjCont", data_train) #R2 0.68
+Rsq(modelo08, "varObjCont", data_test) #R2 0.66
+```
+
+```{r,results='hide'}
+modelo09 <- lm(varObjCont~ +Rn+Desc.Rn+Pres+Temp.Su+HR+HS+Isolar+Vviento+Lluvia , data= data_train )
+summary(modelo09)
+Rsq(modelo09,"varObjCont", data_train) #R2 0.70   #La mejora se nota mucho
+Rsq(modelo09, "varObjCont", data_test) #R2 0.68
+```
+
+## Validación cruzada repetida para modelos manuales técnica forward
+# Validación cruzada repetida
+```{r, echo=FALSE}
+total_modelosM <- c()
+modelos <- sapply(list(modelo01, modelo02, modelo03, modelo04,modelo05, modelo06, modelo07, modelo08, modelo09), formula)
+
+for (i in 1:length(modelos)){
+  set.seed(123456)
+  vcr <- train(as.formula(modelos[[i]]), data = todo,
+               method = "lm",
+               trControl = trainControl(method = "repeatedcv", number = 5, repeats = 20, returnResamp = "all")
+               
+  )
+  total_modelosM <-rbind(total_modelosM,data.frame(vcr$resample, modelo=rep(as.numeric(paste(i)),
+                                                                  nrow(vcr$resample))))
+ 
+}
+
+boxplot(Rsquared~modelo, data = total_modelosM, main= "Modelos selección manual")
+```
+
+```{r}
+aggregate(Rsquared~modelo, data = total_modelosM, mean)
+aggregate(Rsquared~modelo, data = total_modelosM, sd)
+```
+
+```{r  Nº parámetros}
+length(coef(modelo09))          #10           Nos quedamos con este modelo por su R2 y por sus 10 parámetros
+modeloManual<-modelo09
+```
+
+## Ajuste de modelos para TD con selección clásica de variables
+
+```{r step AIC, results='hide'}
+null <- lm(varObjCont~1, data = data_train)
+full <- lm(varObjCont~.,
+           data = data_train[,-c(4,11,12)])
+modeloStepAIC <- step(null, scope=list(lower=null, upper=full),
+                      direction="both", trace = F)
+summary(modeloStepAIC)
+(R2_StepAIC <- Rsq(modeloStepAIC, "varObjCont", data_test))   #R2 0.69   R2 Adj 0.69
+(vif_StepAIC<-car::vif(modeloStepAIC))
+```
+
+```{r Back AIC, results='hide'}
+modeloBackAIC <- step(full, scope = list(lower=null, upper=full), direction="backward", trace= F)
+summary(modeloBackAIC)
+(R2_BackAIC <- Rsq(modeloBackAIC, "varObjCont", data_test))    #R2 0.69  #R2Adj 0.69
+(vif_BackAIC<-car::vif(modeloBackAIC))  # Iguales  que antes
+
+```
+
+```{r Step BIC, results='hide'}
+modeloStepBIC <- step(null, scope = list(lower=null, upper=full), direction="both", k=log(nrow(data_train)))
+summary(modeloStepBIC)
+(R2_StepBIC <- Rsq(modeloStepBIC, "varObjCont", data_test))  #R2 0.69  R2Adj 0.69
+(vif_StepBIC<-car::vif(modeloStepBIC))  
+
+```
+
+```{r Back BIC, results='hide'}
+modeloBackBIC <- step(full, scope=list(lower=null, upper=full), direction="backward", k=log(nrow(data_train)))
+summary(modeloBackBIC)
+(R2_BackBIC <- Rsq(modeloBackBIC, "varObjCont", data_test))  # R2 0.69   R3 Adjusted 0.69
+(vif_BackBIC<-car::vif(modeloBackBIC)) 
+```
+
+## Selección de variables aleatoria
+
+```{r, echo=FALSE}
+rep <- 50
+prop <- 0.7
+modelosGenerados <-c()
+
+for (i in 1:rep){
+  set.seed(123456 + i)
+  subsample <- data_train[sample(1:nrow(data_train),
+                                 prop*nrow(data_train), replace = T),]
+  formOrig <- formula(lm(varObjCont~., data = data_train[,-c(4,11,12)]))
+  full <- lm(formOrig, data = subsample)
+  null <- lm(varObjCont~1, data = subsample)
+  modeloAux <- step(null, scope=list(lower=null, upper = full),
+                    direction = "both", trace = 0, k=log(nrow(subsample)))
+  modelosGenerados <- c(modelosGenerados, paste(sort(gsub(
+    '\n   ','',unlist(strsplit(as.character(formula(modeloAux))[3],
+                               " [+] ")))), collapse = "+"))
+}
+head(freq(modelosGenerados, sort = "dec"),2) # Los dos modelos más repetidos
+```
+
+```{r, results='hide'}
+# Nos quedamos con los dos modelos más repetidos
+modeloAleatorio1<-lm(varObjCont~ Desc.Rn+HR+HS+Isolar+Lluvia+Pres+prop_missings+Rn+Temp.Su+Vviento, data_train)
+summary(modeloAleatorio1)
+Rsq(modeloAleatorio1,"varObjCont", data_train)  #R2 0.73
+Rsq(modeloAleatorio1, "varObjCont", data_test)  #R2 0.70
+modeloAleatorio2<-lm(varObjCont~ Desc.Rn+HR+HS+Isolar+Lluvia+Pres+prop_missings+Rn+Temp.Su, data_train)
+summary(modeloAleatorio2)
+Rsq(modeloAleatorio2,"varObjCont", data_train) #R2 0.72
+Rsq(modeloAleatorio2, "varObjCont", data_test) #R2 0.70
+```
+
+# Comparación final validación cruzada repetida
+
+
+```{r Validación cruzada repetida, echo=FALSE}
+total_ModelosLineales <- c()
+modelos <- sapply(list(modeloManual, modeloStepAIC, modeloBackAIC,
+                        modeloStepBIC,modeloBackBIC,modeloAleatorio1,modeloAleatorio2),formula)
+
+for (i in 1:length(modelos)){
+  set.seed(123456)
+  vcr <- train(as.formula(modelos[[i]]), data = data_train,
+               method = "lm",
+               trControl = trainControl(method = "repeatedcv", number = 5, repeats = 20, returnResamp = "all")
+               
+  )
+  total_ModelosLineales <-rbind(total_ModelosLineales,cbind(vcr$resample[,1:2],
+                                                      modelo=rep(paste("Modelo", i),
+                                                                 nrow(vcr$resample))))
+ 
+}
+
+boxplot(Rsquared~modelo, data = total_ModelosLineales, main= "R2 todos los modelos")
+```
+
+## Elección final
+```{r}
+aggregate(Rsquared~modelo, data = total_ModelosLineales, mean)
+modeloAleatorio2$rank #Nos quedamos con este que es el mejor en cuanto a R2 y N2º de parámetros 
+```
+Nos quedamos con el modeloAleatorio2
+
+## Interpretación del modelo
+```{r}
+modeloFinalLineal <- modeloAleatorio2
+summary(modeloFinalLineal)
+```
+
+- Un aumento unitario en Desc.Rn se traduce en un aumento de 0.077 unidades en la tasa de dosis.
+- El aumento unitario de HS se traduce como una disminución de -0.41 unidades en la TD.
+- El aumento unitario de HR se traduce como un aumento de 0.020 unidades en la TD.
+- Al aumento unitario de Isolar resulta una disminución de -0.001771 en la TD 
+- Si llueve (Lluvia1) la TD aumenta 4.234 unidades.
+- Con el aumento unitario de Pres la TD se ve afectado con una disminución de -0,141
+- Conel aumento unitario de pop_missings tenemos que la TD sube 19.52 unidades.
+- Con el aumento unitario de Rn la TD sube un  0.1308 unidades.
+- Con el aumento unitario de Temp.Su la TD subre en un 0.1577 unidades.
+
+Conclusiones:
+
+La Tasa de Dosis se ve favorecida principalmente por el aumento de la descomposición de descendentes del radón, cuando llueve la tasa de dosis se ve favorecida muy positivamente, que haya humedad relativa hace que aumente ligeramente la tasa de dosis, así como la tempearatura del suelo y la proporción de missings.
+
+# Regresión logística
+
+
+```{r, include=FALSE }
+todoBin <- data.frame(input, varObjBin)
+# Frecuencia de valores de la variable binaria
+freq(todoBin$varObjBin)
+```
+
+## Análisis exploratorio de variables, selección manual
+```{r}
+set.seed(123456)
+trainIndex <- createDataPartition(datos$varObjBin, p=0.8, list=FALSE)
+data_train2 <- todoBin[trainIndex,] #Quitamos transformanciones puesto que hemos comprobado que sube la colin.
+data_test2 <- todoBin[-trainIndex,]
+```
+
+```{r }
+#Modelo inicial
+modeloInicial <- glm(varObjBin~., data=data_train2, family=binomial)
+summary(modeloInicial)
+pseudoR2(modeloInicial,data_train2,"varObjBin")   # pseudo R2 0.48
+pseudoR2(modeloInicial, data_test2,"varObjBin")   # Pseudo R2 0.49
+modeloInicial$rank # 14 parámetros 
+car::vif(modeloInicial) # Variables de temperatura con VIF peligrosos, HR y Vviento poco significativas
+```
+
+```{r, echo=FALSE}
+impVariablesLog(modeloInicial, "varObjBin")
+```
+
+## Selección de variables manual, método hacia atrás
+
+Fijándonos en la importancia de las variables, elegimos sólo las que están por enciam de las aleatorias y trabajaremos sólo con una de las variables de temperatura.
+
+```{r, results='hide'}
+modelog01 <- glm(varObjBin~ +HS+prop_missings+Rn+Lluvia+Temp.Su+Pres+Desc.Rn+Isolar+Vviento+HR, data=data_train2, family=binomial)
+summary(modelog01)
+pseudoR2(modelog01,data_train2,"varObjBin")  # Pseudo R2 0.48 
+pseudoR2(modelog01, data_test2,"varObjBin")  # Pseudo R2 0.49
+# 11 parámetros
+```
+
+```{r, results='hide'}
+modelog02 <- update(modelog01,.~.-HR)
+summary(modelog02)
+pseudoR2(modelog02,data_train2,"varObjBin")    #Pseudo R2 0.4809
+pseudoR2(modelog02, data_test2,"varObjBin")    #Pseudo R2 0.4948
+#10 parámetros
+```
+
+```{r, results='hide'}
+modelog03 <- update(modelog02,.~.-Vviento)
+summary(modelog03)
+pseudoR2(modelog03,data_train2,"varObjBin")   #Pseudo R2 0.4805
+pseudoR2(modelog03, data_test2,"varObjBin")   #Pseudo R2 0.4939
+modelog03$rank   # Hemos reducido los parámetros sin perder R2, este modelo promete bastante
+```
+
+```{r, results='hide'}
+modelog04 <- update(modelog03,.~.-Isolar)
+summary(modelog04)
+pseudoR2(modelog04,data_train2,"varObjBin")   # Pseudo R2 0.4770
+pseudoR2(modelog04, data_test2,"varObjBin")   # Pseudo R2 0.4900
+modelog04$rank   # Aquí ya empezamos a perder un poco de R2
+```
+
+```{r, results='hide'}
+modelog05 <- update(modelog04,.~.-Prop_missings)
+summary(modelog05)
+pseudoR2(modelog05,data_train2,"varObjBin") # Pseudo R2 0.4770  
+pseudoR2(modelog05, data_test2,"varObjBin") # Pseudo R2 0.4900
+#La perdida de R2 en el modelo es evidente
+```
+
+```{r, results='hide'}
+modelog06 <- update(modelog05,.~.-Desc.Rn)
+summary(modelog06)
+pseudoR2(modelog06,data_train2,"varObjBin")   # Pseudo R2 0.47005
+pseudoR2(modelog06, data_test2,"varObjBin")   # Pseudo R2 0.4785
+```
+
+```{r, results='hide'}
+modelog07 <- update(modelog06,.~.-Pres)
+summary(modelog07)
+pseudoR2(modelog07,data_train2,"varObjBin")   #Pseudo R2 0.4608
+pseudoR2(modelog07, data_test2,"varObjBin")   #Pseudo R2 0.4662
+```
+
+```{r, results='hide'}
+modelog08 <- update(modelog07,.~.-Temp.Su)
+summary(modelog07)
+pseudoR2(modelog07,data_train2,"varObjBin")   #Pseudo R2 0.4608
+pseudoR2(modelog07, data_test2,"varObjBin")   #Pseudo R2 0.4662
+
+```
+
+## tabla resumen del modelo manual método backward
+```{r, echo=FALSE}
+modelog_Man <- list(modelog01, modelog02, modelog03, modelog04,
+                    modelog05, modelog06, modelog07,modelog08, modeloInicial)
+# pseudo R2
+psR_Man<- lapply(modelog_Man, pseudoR2, data_test2, "varObjBin")
+
+# Los vif
+vif_Man <- lapply(modelog_Man, car::vif)
+
+
+```
+
+```{r, echo=FALSE}
+vifMax_Man <- c()
+for (i in 1:length(vif_Man)){
+  if (class(vif_Man[[i]])=='numeric'){
+    vifMax_Man[i]=max(vif_Man[[i]])
+  } else{
+    vifMax_Man[i]=max(vif_Man[[i]][,3])
+  }
+}
+
+tabla_modelosM <- tibble(
+  Modelo = c('modelog01', 'modelog02', 'modelog03', 'modelog04',
+             'modelog05', 'modelog06', 'modelog07','modelog08', 'modeloInicial'),
+  parametros=lapply(lapply(modelog_Man,coef),length),
+  pseudoR = unlist(psR_Man),
+  VIF_max=vifMax_Man)
+
+#Imprimimos tabla
+kable(tabla_modelosM,
+      caption = "Modelos Selección de variables clásica forward", 
+      booktabs = T) %>%
+  
+kable_styling(latex_options = "striped")
+```
+
+```{r}
+modelogManual1 <- modelog02 #nos quedamos con estos dos que son los mejores en cuenta a R2 y parámetros
+modelogManual2 <- modelog03
+```
+
+## Selección de variables clásica
+```{r, results='hide'}
+#Modelo mínimo
+null<- glm(varObjBin~1, data = data_train2, family = binomial)
+#Modelo máximo
+full<-glm(varObjBin~., data = data_train2[,-c(4,5,8,12,13)], family= binomial)
+modelogStepAIC <- step(null, scope = list(lower=null, upper=full), trace = 0, direction = "both")
+summary(modelogStepAIC)
+car::vif(modelogStepAIC)
+modelogStepAIC$rank
+psr_clas1 <- pseudoR2(modelogStepAIC, data_test2, "varObjBin")
+```
+
+```{r, results='hide'}
+modelogBackAIC <- step(full, scope = list(lower=null, upper=full), trace = 0, direction = "backward")
+summary(modelogBackAIC)
+psr_clas2 <- pseudoR2(modelogBackAIC, data_test2, "varObjBin")
+```
+
+```{r, results='hide'}
+modelogStepBIC <- step(null, scope = list(lower=null, upper=full), trace = 0, direction = "both", k=log(nrow(data_train2)))
+summary(modelogStepBIC)
+psr_clas3 <- pseudoR2(modelogStepBIC, data_test2, "varObjBin")
+```
+
+```{r, results='hide'}
+modelogBackBIC <- step(full, scope = list(lower=null, upper=full), trace = 0, direction = "both", k=log(nrow(data_train2)))
+summary(modelogBackBIC)
+psr_clas4 <- pseudoR2(modelogBackBIC, data_test2, "varObjBin")
+```
+## Selección aleatoria de variables
+
+```{r, echo=FALSE}
+rep <- 50
+prop <- 0.7
+modelosGenerados <-c()
+
+for (i in 1:rep){
+  set.seed(123456 + i)
+  subsample <- data_train2[sample(1:nrow(data_train2),
+                                 prop*nrow(data_train2), replace = T),]
+  formOrig <- formula(glm(varObjBin~., data = data_train2[,-c(4,5,8,12,13)], family = 'binomial'))
+  full <- glm(formOrig, data = subsample, family = "binomial")
+  null <- glm(varObjBin~1, data = subsample, family = "binomial")
+  modeloAux <- step(null, scope=list(lower=null, upper = full),
+                    direction = "both", trace = 0, k=log(nrow(subsample)))
+  modelosGenerados <- c(modelosGenerados, paste(sort(gsub(
+    '\n   ','',unlist(strsplit(as.character(formula(modeloAux))[3],
+                               " [+] ")))), collapse = "+"))
+}
+head(freq(modelosGenerados, sort = "dec"),2) # Los dos modelos más repetidos
+```
+```{r, results='hide'}
+modelogAleat1<- glm(varObjBin~ Desc.Rn+HS+Isolar+Lluvia+Pres+prop_missings+Rn+Temp.Su, data_train2, family = 'binomial')
+summary(modelogAleat1)
+pseudoR2(modelogAleat1, data_test2, "varObjBin")
+pseudoR2(modelogAleat1, data_train2, "varObjBin")
+modelogAleat2<- glm(varObjBin~ Desc.Rn+HS+Lluvia+Pres+prop_missings+Rn+Temp.Su, data_train2, family = 'binomial')
+summary(modelogAleat2)
+pseudoR2(modelogAleat2, data_test2, "varObjBin")
+pseudoR2(modelogAleat2, data_train2, "varObjBin")
+```
+
+## Validación cruzada repetida
+```{r, echo=FALSE}
+#Probamos los modelos con validación cruzada repetida
+total_modelosLog <- c()
+auxVarObj <- datos$varObjBin
+modelosLog <- sapply(list(modelogManual1, modelogManual2, modelogStepAIC,
+                         modelogBackAIC, modelogStepBIC, modelogBackBIC, modelogAleat1, modelogAleat2),formula)
+
+datos$varObjBin <- make.names(datos$varObjBin)
+
+for (i in 1:length(modelosLog)){
+  set.seed(123456)
+  vcr <- train(as.formula(modelosLog[[i]]), data=datos,
+               method="glm", family= binomial, metric="ROC",
+               trControl=trainControl(method="repeatedcv", number=5, repeats=20,
+                                      summaryFunction=twoClassSummary,
+                                      classProbs=TRUE, returnResamp="all")
+  )
+  total_modelosLog <- rbind(total_modelosLog,cbind(vcr$resample[,1:2], modelo=rep(paste("Modelo",i),
+                                                            nrow(vcr$resample))))
+  
+}
+datos$varObjBin<-auxVarObj
+boxplot(ROC ~modelo, data=total_modelosLog, main="Accuracy")
+```
+No quedamos con el modelogManual1, por el número de parámetros, y por su PseudoR2
+```{r}
+aggregate(ROC ~modelo, data=total_modelosLog,mean)
+aggregate(ROC ~modelo, data= total_modelosLog, sd)
+modelogManual1$rank
+```
+## Interpretación y evaluación del modelo ganador
+```{r}
+modLogFinal <- glm(formula(modelogManual1), data=datos, family='binomial')
+coef(modLogFinal)
+logistic.display(modLogFinal) #pop_missings da on OR bastante extraño algo no va bien con esta variable
+```
+- Por cada aumento unitario de la variable HR, el logit de la respuesta aumenta en 0.77 unidades.
+-Por cada aumento unitario de R, el logit de la variable respuesta aumenta en 1.06 unidades.
+- El hecho de que haya Lluvia aumenta en 20.1
+- Un aumento unitario de Temp.Su hace que el logit de PicoRad aumente en 1.07 unidades.
+- Por cada aumento unitario de Pres el logit de PicoRad subre 0.93 unidades.
+- el aumento unitario de Desc.Rn produce un aumento del logit de la objetivo de 1.03 unidades.
+- Cada aumento unitario de Isolar y de Vviento producen un aumento del logit de PicoRad de 0.99 y 0.99 respectivamente.
+
+La proporción de missings saparece con unas probabilidades sobredimensionadas debido a que durante la búsqueda de outliers hubo una gran cantidad que cambiamos a missings y después imputamos, es posible que en cierta estos valores atípicos influyeran en PicoRad.
+
+## Búsqueda del punto de corte óptimo de la probabilidad estimada.
+
+```{r, echo=FALSE}
+#Gráfico de las probabilidades obtenidas
+hist_targetbinaria(predict(modLogFinal, newdata = data_test2,type="response"),data_test2$varObjBin,"probabilidad")
+```
+El gráfico nos muestra una distribución de valores 1 (azul) que son probabilidades altas, y 0 (rojo) presenta mayores probabilidades bajas, el modelo parace distinguir bien esto. Parece que el modelo arrojaría resultados claros alrededor el punto 0.38.
+```{r}
+#Probamos dos puntos
+sensEspCorte(modLogFinal, data_test2, "varObjBin", 0.38, "1")
+sensEspCorte(modLogFinal, data_test2, "varObjBin", 0.35, "1")
+```
+
+```{r, collapse=TRUE}
+#Rejilla
+posiblesCortes<- seq(0,1,0.01)
+rejilla<-data.frame(t(rbind(posiblesCortes, sapply(posiblesCortes,function(x) sensEspCorte(modLogFinal,data_test2,"varObjBin",x,"1")))))
+rejilla$Youden<- rejilla$Sensitivity+rejilla$Specificity-1
+#Graficamos 
+plot(rejilla$posiblesCortes,rejilla$Youden)
+plot(rejilla$posiblesCortes,rejilla$Accuracy)
+#Buscamos los puntos que se maximizan
+rejilla$posiblesCortes[which.max(rejilla$Youden)]
+rejilla$posiblesCortes[which.max(rejilla$Accuracy)]
+#Comparamos con nuestros puntos de antes
+sensEspCorte(modLogFinal, data_test2, "varObjBin", 0.4, "1")
+sensEspCorte(modLogFinal, data_test2, "varObjBin", 0.43, "1") #Mejor punto 
+```
+Tasa de acierto del 88%
+
+```{r, collapse=TRUE}
+#las variables más importantes del modelo ganador
+impVariablesLog(modLogFinal, "varObjBin")
+#evaluamos la estabilidad del modelo
+pROC::roc(data_train2$varObjBin, predict(modLogFinal, data_train2, type="response"), direction="<")
+pROC::roc(data_test2$varObjBin, predict(modLogFinal, data_test2, type="response"), direction="<")
+#Predicción en test en forma de probabilidad estimada
+predTest <- predict(modLogFinal,data_test2, type = "response")
+head(predTest)
+clasTest<- factor(ifelse(predTest>0.4,1,0))
+#Matriz de confusión
+confusionMatrix(clasTest, data_test2$varObjBin, positive = "1") 
+```
+Un área bajo la curva de ROC de 0.93 en test
+
